@@ -149,7 +149,7 @@ def export_matches_injection(
 def _read_signed_varint(data: bytes, offset: int) -> tuple[int, int]:
     """Read Chromeleon's sign-and-magnitude variable-length integer."""
     if offset >= len(data):
-        raise CmbxParseError("RAW-блок обрывается внутри целого числа")
+        raise CmbxParseError("RAW block ends inside an integer")
 
     first = data[offset]
     offset += 1
@@ -158,12 +158,12 @@ def _read_signed_varint(data: bytes, offset: int) -> tuple[int, int]:
     shift = 6
     while first & 0x80:
         if offset >= len(data):
-            raise CmbxParseError("RAW-блок обрывается внутри целого числа")
+            raise CmbxParseError("RAW block ends inside an integer")
         first = data[offset]
         offset += 1
         chunk = first & 0x7F
         if shift >= 63 or chunk > (_MAX_SIGNED_INTEGER - magnitude) >> shift:
-            raise CmbxParseError("В RAW-блоке слишком большое целое число")
+            raise CmbxParseError("RAW integer is too large")
         magnitude |= chunk << shift
         shift += 7
 
@@ -182,7 +182,7 @@ def _decode_ddcmp_block(
     version, reserved, decompressed_size, compressed_size = header
     if (version, reserved) != (1, 0):
         raise CmbxParseError(
-            f"Неподдерживаемый заголовок блока PtsDDCmp: {version}, {reserved}"
+            f"Unsupported PtsDDCmp block header: {version}, {reserved}"
         )
     if (
         decompressed_size <= 0
@@ -190,19 +190,19 @@ def _decode_ddcmp_block(
         or decompressed_size > _MAX_SIGNAL_POINTS * 16
     ):
         raise CmbxParseError(
-            "Некорректный размер распакованных данных в блоке PtsDDCmp"
+            "Invalid decompressed data size in PtsDDCmp block"
         )
     point_count = decompressed_size // 16
     if existing_point_count + point_count > _MAX_SIGNAL_POINTS:
-        raise CmbxParseError("В RAW-файле слишком много точек")
+        raise CmbxParseError("RAW file contains too many points")
     if compressed_size != len(body) - offset or compressed_size < 2:
         raise CmbxParseError(
-            "Размер сжатых данных в блоке PtsDDCmp не совпадает с заголовком"
+            "Compressed data size in PtsDDCmp block does not match the header"
         )
 
     dictionary_property = body[offset]
     if dictionary_property > 40:
-        raise CmbxParseError("Некорректный параметр словаря LZMA2 в PtsDDCmp")
+        raise CmbxParseError("Invalid LZMA2 dictionary parameter in PtsDDCmp")
     # LZMA2 stores its dictionary size in one property byte before the stream.
     dictionary_size = (
         0xFFFFFFFF
@@ -210,7 +210,7 @@ def _decode_ddcmp_block(
         else (2 | (dictionary_property & 1)) << (dictionary_property // 2 + 11)
     )
     if dictionary_size > _MAX_LZMA2_DICTIONARY:
-        raise CmbxParseError("Словарь LZMA2 в PtsDDCmp превышает допустимый размер")
+        raise CmbxParseError("LZMA2 dictionary in PtsDDCmp exceeds the allowed size")
 
     try:
         decoder = lzma.LZMADecompressor(
@@ -221,7 +221,7 @@ def _decode_ddcmp_block(
             body[offset + 1 :], max_length=decompressed_size + 1
         )
     except (lzma.LZMAError, ValueError) as error:
-        raise CmbxParseError(f"Не удалось распаковать блок PtsDDCmp: {error}") from error
+        raise CmbxParseError(f"Failed to decompress PtsDDCmp block: {error}") from error
 
     if (
         len(decompressed) != decompressed_size
@@ -229,7 +229,7 @@ def _decode_ddcmp_block(
         or decoder.unused_data
     ):
         raise CmbxParseError(
-            "Распакованный блок PtsDDCmp не совпадает с объявленным размером"
+            "Decompressed PtsDDCmp block size does not match the declared size"
         )
 
     points = list(struct.iter_unpack("<dd", decompressed))
@@ -237,7 +237,7 @@ def _decode_ddcmp_block(
         math.isfinite(time_min) and math.isfinite(value)
         for time_min, value in points
     ):
-        raise CmbxParseError("В блоке PtsDDCmp обнаружены нечисловые значения")
+        raise CmbxParseError("Non-numeric values found in PtsDDCmp block")
     return points
 
 
@@ -250,7 +250,7 @@ def _decode_signal(
 ) -> Chromatogram:
     """Parse a RAW member, decode its single point encoding, and normalize units."""
     if len(raw_data) > _MAX_RAW_BYTES:
-        raise CmbxParseError("RAW-файл слишком большой для разбора")
+        raise CmbxParseError("RAW file is too large to parse")
 
     offset = 0
     signal_name: str | None = None
@@ -267,44 +267,44 @@ def _decode_signal(
     # RAW members are concatenated sections with an 8-byte tag and 8-byte size.
     while offset < len(raw_data):
         if offset + 16 > len(raw_data):
-            raise CmbxParseError(f"RAW-файл обрывается в секции со смещения {offset}")
+            raise CmbxParseError(f"RAW file ends in the middle of a section at offset {offset}")
 
         tag = raw_data[offset : offset + 8]
         section_size = struct.unpack_from("<Q", raw_data, offset + 8)[0]
         if section_size < 16 or offset + section_size > len(raw_data):
             raise CmbxParseError(
-                f"Некорректный размер RAW-секции со смещения {offset}: {section_size}"
+                f"Invalid RAW section size at offset {offset}: {section_size}"
             )
         body = raw_data[offset + 16 : offset + section_size]
 
         if tag == _SIGNAL_HEADER_TAG:
             if signal_name is not None:
-                raise CmbxParseError("В RAW-файле несколько заголовков SignHdr")
+                raise CmbxParseError("RAW file contains multiple SignHdr headers")
             if len(body) < 15 or body[:3] != b"\x01\x02\x07":
-                raise CmbxParseError("Некорректный заголовок SignHdr в RAW-файле")
+                raise CmbxParseError("Invalid SignHdr header in RAW file")
             name_length = body[14]
             try:
                 signal_name = body[15 : 15 + name_length].decode("utf-8")
             except UnicodeDecodeError as error:
                 raise CmbxParseError(
-                    "Имя канала в SignHdr имеет неверную кодировку"
+                    "Channel name in SignHdr has an invalid encoding"
                 ) from error
             if len(signal_name.encode("utf-8")) != name_length:
-                raise CmbxParseError("Имя канала в SignHdr обрезано")
+                raise CmbxParseError("Channel name in SignHdr is truncated")
             if signal_name != channel_name:
                 raise CmbxParseError(
-                    f"В RAW-файле найден канал {signal_name!r}, "
-                    f"ожидался «{channel_name}»"
+                    f"RAW file contains channel {signal_name!r}, "
+                    f"expected {channel_name!r}"
                 )
         elif tag == _PTS_LL2_TAG:
             if signal_name is None:
-                raise CmbxParseError("В RAW-файле секция точек находится до SignHdr")
+                raise CmbxParseError("RAW file has point section data before SignHdr")
             if signal_encoding is not None and signal_encoding != tag:
-                raise CmbxParseError("В RAW-файле смешаны форматы секций точек")
+                raise CmbxParseError("RAW file mixes point section formats")
             signal_encoding = tag
             if len(body) < 16:
                 raise CmbxParseError(
-                    "Секция PtsLL2Df не содержит параметры данных"
+                    "PtsLL2Df section does not contain data parameters"
                 )
 
             block_time_units, block_value_units = struct.unpack_from("<dd", body)
@@ -315,13 +315,13 @@ def _decode_signal(
                 or block_value_units <= 0
             ):
                 raise CmbxParseError(
-                    "Некорректные единицы времени или сигнала в PtsLL2Df"
+                    "Invalid time or signal units in PtsLL2Df"
                 )
             if time_units is not None and (
                 block_time_units != time_units or block_value_units != value_units
             ):
                 raise CmbxParseError(
-                    "В RAW-файле меняются единицы между блоками PtsLL2Df"
+                    "RAW file changes units between PtsLL2Df blocks"
                 )
             time_units = block_time_units
             value_units = block_value_units
@@ -333,12 +333,11 @@ def _decode_signal(
                 encoded.append(integer)
             if not encoded or encoded.pop() != 0 or len(encoded) % 2:
                 raise CmbxParseError(
-                    "Секция PtsLL2Df должна содержать пары (время, значение) "
-                    "и нулевой терминатор"
+                    "PtsLL2Df section must contain (time, value) pairs and a zero terminator"
                 )
             point_count = len(encoded) // 2
             if len(ticks) + point_count > _MAX_SIGNAL_POINTS:
-                raise CmbxParseError("В RAW-файле слишком много точек")
+                raise CmbxParseError("RAW file contains too many points")
 
             # PtsLL2Df stores pairs of second differences after the first pair.
             tick = value = tick_delta = value_delta = 0
@@ -357,46 +356,46 @@ def _decode_signal(
                     value += value_delta
                 if not -(1 << 63) <= tick_delta <= _MAX_SIGNED_INTEGER:
                     raise CmbxParseError(
-                        "Шаг времени в RAW-файле выходит за допустимый диапазон"
+                        "RAW time step exceeds the allowed range"
                     )
                 if not -(1 << 63) <= value_delta <= _MAX_SIGNED_INTEGER:
                     raise CmbxParseError(
-                        "Шаг сигнала в RAW-файле выходит за допустимый диапазон"
+                        "RAW signal step exceeds the allowed range"
                     )
                 if not -(1 << 63) <= tick <= _MAX_SIGNED_INTEGER:
                     raise CmbxParseError(
-                        "Время в RAW-файле выходит за допустимый диапазон"
+                        "RAW time exceeds the allowed range"
                     )
                 if not -(1 << 63) <= value <= _MAX_SIGNED_INTEGER:
                     raise CmbxParseError(
-                        "Значение сигнала в RAW-файле выходит за допустимый диапазон"
+                        "RAW signal value exceeds the allowed range"
                     )
                 ticks.append(tick)
                 values_raw.append(value)
         elif tag == _PTS_LDIFF_TAG:
             if signal_name is None:
-                raise CmbxParseError("В RAW-файле секция точек находится до SignHdr")
+                raise CmbxParseError("RAW file has point section data before SignHdr")
             if signal_encoding is not None and signal_encoding != tag:
-                raise CmbxParseError("В RAW-файле смешаны форматы секций точек")
+                raise CmbxParseError("RAW file mixes point section formats")
             signal_encoding = tag
             if len(body) <= _PTS_LDIFF_HEADER_SIZE:
-                raise CmbxParseError("Секция PtsLDiff не содержит значения сигнала")
+                raise CmbxParseError("PtsLDiff section does not contain a signal value")
 
             # PtsLDiff stores a block start time, shared parameters, and
             # first differences of the signal values.
             start_time_min = struct.unpack_from("<d", body)[0]
             if not math.isfinite(start_time_min):
-                raise CmbxParseError("Некорректное время начала блока PtsLDiff")
+                raise CmbxParseError("Invalid start time in PtsLDiff block")
             block_header = body[8:_PTS_LDIFF_HEADER_SIZE]
             if diff_header is not None and block_header != diff_header:
-                raise CmbxParseError("В RAW-файле меняются параметры блоков PtsLDiff")
+                raise CmbxParseError("RAW file changes PtsLDiff block parameters")
             diff_header = block_header
 
             block_offset = _PTS_LDIFF_HEADER_SIZE
             first_value, block_offset = _read_signed_varint(body, block_offset)
             block_values = [first_value]
             if diff_point_count + len(block_values) > _MAX_SIGNAL_POINTS:
-                raise CmbxParseError("В RAW-файле слишком много точек")
+                raise CmbxParseError("RAW file contains too many points")
             terminated = False
             while block_offset < len(body):
                 if body[block_offset] == 0x40:
@@ -407,24 +406,24 @@ def _decode_signal(
                 value = block_values[-1] + delta
                 if not -(1 << 63) <= value <= _MAX_SIGNED_INTEGER:
                     raise CmbxParseError(
-                        "Значение сигнала в RAW-файле выходит за допустимый диапазон"
+                        "RAW signal value exceeds the allowed range"
                     )
                 block_values.append(value)
                 if diff_point_count + len(block_values) > _MAX_SIGNAL_POINTS:
                     raise CmbxParseError(
-                        "В RAW-файле слишком много точек"
+                        "RAW file contains too many points"
                     )
             if not terminated or block_offset != len(body):
                 raise CmbxParseError(
-                    "Секция PtsLDiff обрывается или содержит данные после терминатора"
+                    "PtsLDiff section is truncated or contains data after the terminator"
                 )
             diff_blocks.append((start_time_min, block_values))
             diff_point_count += len(block_values)
         elif tag == _PTS_DDCMP_TAG:
             if signal_name is None:
-                raise CmbxParseError("В RAW-файле секция точек находится до SignHdr")
+                raise CmbxParseError("RAW file has point section data before SignHdr")
             if signal_encoding is not None and signal_encoding != tag:
-                raise CmbxParseError("В RAW-файле смешаны форматы секций точек")
+                raise CmbxParseError("RAW file mixes point section formats")
             signal_encoding = tag
             ddcmp_points.extend(
                 _decode_ddcmp_block(body, existing_point_count=len(ddcmp_points))
@@ -432,23 +431,23 @@ def _decode_signal(
         else:
             section_name = tag.decode("ascii", errors="replace").rstrip("\0")
             raise CmbxParseError(
-                f"Неподдерживаемая секция RAW «{section_name}»; "
-                f"для {channel_name} поддерживаются форматы "
-                "PtsLL2Df, PtsLDiff и PtsDDCmp"
+                f"Unsupported RAW section {section_name!r}; "
+                f"for {channel_name} the supported formats are "
+                "PtsLL2Df, PtsLDiff, and PtsDDCmp"
             )
 
         offset += section_size
 
     if signal_name is None or signal_encoding is None:
         raise CmbxParseError(
-            f"В RAW-файле отсутствует заголовок или точки {channel_name}"
+            f"RAW file is missing the header or points for {channel_name}"
         )
     if signal_encoding == _PTS_LDIFF_TAG:
         if not diff_blocks:
-            raise CmbxParseError(f"В RAW-файле отсутствуют точки {channel_name}")
+            raise CmbxParseError(f"RAW file is missing points for {channel_name}")
         if len(diff_blocks) == 1 and len(diff_blocks[0][1]) > 1:
             raise CmbxParseError(
-                "Невозможно определить интервал времени для одного блока PtsLDiff"
+                "Unable to determine the time interval for a single PtsLDiff block"
             )
 
         # Each PtsLDiff block starts after the samples in the preceding block;
@@ -466,7 +465,7 @@ def _decode_signal(
                 for candidate in interval_candidates[1:]
             ):
                 raise CmbxParseError(
-                    "Интервалы времени блоков PtsLDiff несовместимы"
+                    "PtsLDiff block time intervals are incompatible"
                 )
         else:
             step_s = 0.0
@@ -494,11 +493,11 @@ def _decode_signal(
     else:
         if time_units is None or value_units is None or not ticks:
             raise CmbxParseError(
-                f"В RAW-файле отсутствует заголовок или точки {channel_name}"
+                f"RAW file is missing the header or points for {channel_name}"
             )
         if any(current <= previous for previous, current in zip(ticks, ticks[1:])):
             raise CmbxParseError(
-                f"Время точек {channel_name} в RAW-файле не возрастает"
+                f"Timestamps for {channel_name} in the RAW file are not increasing"
             )
         times_min = tuple(tick / time_units for tick in ticks)
         values = tuple(value / value_units for value in values_raw)
@@ -509,10 +508,10 @@ def _decode_signal(
 
     if not all(math.isfinite(value) for value in (*times_min, *values)):
         raise CmbxParseError(
-            "В RAW-файле обнаружены значения вне числового диапазона"
+            "RAW file contains non-numeric values outside the valid range"
         )
     if any(current <= previous for previous, current in zip(times_min, times_min[1:])):
-        raise CmbxParseError(f"Время точек {channel_name} в RAW-файле не возрастает")
+        raise CmbxParseError(f"Timestamps for {channel_name} in the RAW file are not increasing")
     return Chromatogram(
         source=source,
         metadata={
@@ -552,11 +551,11 @@ def read_cmbx_channel(
     )
     if channel is None:
         raise CmbxParseError(
-            f"У инъекции {injection.name!r} отсутствует канал {channel_name}"
+            f"Injection {injection.name!r} does not contain channel {channel_name}"
         )
     if not channel.raw_filename:
         raise CmbxParseError(
-            f"Для канала {channel_name} инъекции {injection.name!r} нет RAW-файла"
+            f"Channel {channel_name} in injection {injection.name!r} has no RAW file"
         )
 
     try:
@@ -565,23 +564,23 @@ def read_cmbx_channel(
                 info = archive.getinfo(channel.raw_filename)
             except KeyError as error:
                 raise CmbxParseError(
-                    f"В CMBX-архиве отсутствует RAW-файл {channel.raw_filename}"
+                    f"CMBX archive is missing RAW file {channel.raw_filename}"
                 ) from error
             if info.file_size > _MAX_RAW_BYTES:
                 raise CmbxParseError(
-                    f"RAW-файл {channel.raw_filename} слишком большой"
+                    f"RAW file {channel.raw_filename} is too large"
                 )
             if channel.size is not None and info.file_size != channel.size:
                 raise CmbxParseError(
-                    f"Размер RAW-файла {channel.raw_filename} "
-                    "не совпадает с header.xml"
+                    f"RAW file size for {channel.raw_filename} "
+                    "does not match header.xml"
                 )
             raw_data = archive.read(info)
     except CmbxParseError:
         raise
     except (OSError, BadZipFile, RuntimeError) as error:
         raise CmbxParseError(
-            f"Не удалось прочитать RAW-файл {channel.raw_filename}: {error}"
+            f"Failed to read RAW file {channel.raw_filename}: {error}"
         ) from error
 
     resolved_unit = (
@@ -639,17 +638,17 @@ def read_cmbx(path: Path | str) -> CmbxSequence:
             try:
                 header = ElementTree.fromstring(archive.read("header.xml"))
             except KeyError as error:
-                raise CmbxParseError("В архиве отсутствует header.xml") from error
+                raise CmbxParseError("Archive is missing header.xml") from error
             except ElementTree.ParseError as error:
-                raise CmbxParseError("Не удалось разобрать header.xml") from error
+                raise CmbxParseError("Failed to parse header.xml") from error
     except (OSError, BadZipFile) as error:
         raise CmbxParseError(
-            f"Не удалось открыть CMBX-архив {source}: {error}"
+            f"Failed to open CMBX archive {source}: {error}"
         ) from error
 
     sequence_element = header.find("./ChromeleonElement")
     if sequence_element is None:
-        raise CmbxParseError("В header.xml отсутствует объект последовательности")
+        raise CmbxParseError("header.xml is missing the sequence object")
 
     # Injections are direct children of the sequence; their children describe
     # channels and point to optional RAW members.
@@ -664,7 +663,7 @@ def read_cmbx(path: Path | str) -> CmbxSequence:
                 size = int(raw_size) if raw_size else None
             except ValueError as error:
                 raise CmbxParseError(
-                    "Некорректный размер RAW-файла у канала "
+                    "Invalid RAW file size for channel "
                     f"{child.attrib.get('Name', '')}"
                 ) from error
             channels.append(
@@ -685,7 +684,7 @@ def read_cmbx(path: Path | str) -> CmbxSequence:
         )
 
     if not injections:
-        raise CmbxParseError("В последовательности не найдены инъекции")
+        raise CmbxParseError("No injections were found in the sequence")
 
     return CmbxSequence(
         source=source,
